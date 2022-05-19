@@ -9,11 +9,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from models.language_utils import repackage_hidden, process_x, process_y
-from models.Update import LocalUpdate_with_localdistill_all
 import json
 
-from log_utils.logger import loss_logger, cfs_mtrx_logger, parameter_logger, data_logger, para_record_dir
+from log_utils.logger import info_logger
 
 
 class DatasetSplit(Dataset):
@@ -54,11 +52,6 @@ def test_img_local(net_g, dataset, args, idx=None, indd=None, user_idx=-1, idxs=
         for j in range(len(dataset[usr]['x'])):
             datatest_new.append(
                 (torch.reshape(torch.tensor(dataset[idx]['x'][j]), (1, 28, 28)), torch.tensor(dataset[idx]['y'][j])))
-    elif 'sent140' in args.dataset:
-        leaf = True
-        datatest_new = []
-        for j in range(len(dataset[idx]['x'])):
-            datatest_new.append((dataset[idx]['x'][j], dataset[idx]['y'][j]))
     else:
         leaf = False
 
@@ -67,45 +60,19 @@ def test_img_local(net_g, dataset, args, idx=None, indd=None, user_idx=-1, idxs=
                                  shuffle=False)
     else:
         data_loader = DataLoader(DatasetSplit(dataset, idxs), batch_size=args.local_bs, shuffle=False)
-    if 'sent140' in args.dataset:
-        hidden_train = net_g.init_hidden(args.local_bs)
     count = 0
     for idx, (data, target) in enumerate(data_loader):
-        if 'sent140' in args.dataset:
-            input_data, target_data = process_x(data, indd), process_y(target, indd)
-            if args.local_bs != 1 and input_data.shape[0] != args.local_bs:
-                break
+        if args.gpu != -1:
+            data, target = data.to(args.device), target.to(args.device)
+        _,log_probs = net_g(data)
+        # sum up batch loss
+        test_loss += F.cross_entropy(log_probs, target, reduction='sum').item()
+        y_pred = log_probs.data.max(1, keepdim=True)[1]
+        for tgt, prd in zip(target.tolist(), y_pred.squeeze(1).tolist()):
+            confusion_martix[tgt][prd] += 1
 
-            data, targets = torch.from_numpy(input_data).to(args.device), torch.from_numpy(target_data).to(args.device)
-            net_g.zero_grad()
+        correct += y_pred.eq(target.data.view_as(y_pred)).long().cpu().sum()
 
-            hidden_train = repackage_hidden(hidden_train)
-            output, hidden_train,_ = net_g(data, hidden_train)
-
-            loss = F.cross_entropy(output.t(), torch.max(targets, 1)[1])
-            _, pred_label = torch.max(output.t(), 1)
-            correct += (pred_label == torch.max(targets, 1)[1]).sum().item()
-            # count += args.local_bs
-            count += min(args.local_bs, input_data.shape[0])
-            # print(args.local_bs)
-            # print(count)
-            test_loss += loss.item() * min(args.local_bs, input_data.shape[0])
-
-        else:
-            if args.gpu != -1:
-                data, target = data.to(args.device), target.to(args.device)
-            _,log_probs = net_g(data)
-            # sum up batch loss
-            test_loss += F.cross_entropy(log_probs, target, reduction='sum').item()
-            y_pred = log_probs.data.max(1, keepdim=True)[1]
-            for tgt, prd in zip(target.tolist(), y_pred.squeeze(1).tolist()):
-                confusion_martix[tgt][prd] += 1
-
-            correct += y_pred.eq(target.data.view_as(y_pred)).long().cpu().sum()
-
-    if 'sent140' not in args.dataset:
-        count = len(data_loader.dataset)
-    # print("count:"+str(count))
     test_loss /= count
     accuracy = 100.00 * float(correct) / count
     return accuracy, test_loss, confusion_martix
@@ -123,232 +90,19 @@ def test_img_local_all(net, args, dataset_test, dict_users_test, sampled_client_
 
         net_local = copy.deepcopy(net)
 
-        # 其他客户端也经过一次训练再测试
-        # if idx not in sampled_client_list:
-        #
-        #     if 'femnist' in args.dataset or 'sent140' in args.dataset:
-        #         if args.epochs == iter:
-        #             # finetune
-        #             local = LocalUpdate_with_localdistill_all(args=args, dataset=dataset_train[list(dataset_train.keys())[idx][:args.m_ft]],
-        #                                 idxs=dict_users_train, indd=indd)
-        #         else:
-        #             # train
-        #             local = LocalUpdate_with_localdistill_all(args=args, dataset=dataset_train[list(dataset_train.keys())[idx][:args.m_tr]],
-        #                                 idxs=dict_users_train, indd=indd)
-        #     else:
-        #         if args.epochs == iter:
-        #             local = LocalUpdate_with_localdistill_all(args=args, dataset=dataset_train, idxs=dict_users_train[idx][:args.m_ft])
-        #         else:
-        #             local = LocalUpdate_with_localdistill_all(args=args, dataset=dataset_train, idxs=dict_users_train[idx][:args.m_tr])
-        #
-        #     net_local = copy.deepcopy(net)
-        #     w_local = net_local.state_dict()  # global
-        #     net_local.load_state_dict(w_local)
-        #
-        #     teacher_net = copy.deepcopy(net)  # teacher 为前一轮的模型
-        #     w_teacher = teacher_net.state_dict()
-        #     for k in w_locals[idx].keys():
-        #         w_teacher[k] = w_locals[idx][k]
-        #     teacher_net.load_state_dict(w_teacher)
-        #
-        #     if args.l2_type == 'ewc':
-        #         if 'femnist' in args.dataset or 'sent140' in args.dataset:
-        #             local_ewc = LocalUpdate_with_localdistill_all(args=args, dataset=dataset_train[
-        #                 list(dataset_train.keys())[idx][:args.m_tr]],
-        #                                                           idxs=dict_users_train, indd=indd)
-        #         else:
-        #             local_ewc = LocalUpdate_with_localdistill_all(args=args, dataset=dataset_train,
-        #                                                           idxs=dict_users_train[idx][:args.m_ft])
-        #
-        #         teacher_net_perloader = copy.deepcopy(teacher_net)
-        #         param_weight = local_ewc.get_paramweight(teacher_net_perloader)
-        #     elif args.l2_type == 'l2':
-        #         param_weight = 'l2'
-        #     else:
-        #         param_weight = None
-        #         # print('------------------------Failed: error l2 loss type-----------------------------')
-        #
-        #     last = iter == args.epochs
-        #     if 'femnist' in args.dataset or 'sent140' in args.dataset:
-        #         if args.is_decay:
-        #             if 'femnist' in args.dataset:
-        #                 if iter <= 80:
-        #                     args.lr = args.lr
-        #                 elif iter <= 120:
-        #                     args.lr = args.lr * 0.995
-        #                 else:
-        #                     args.lr = args.lr * 0.99
-        #             if "cifar10" in args.dataset:
-        #                 if iter <= 50:
-        #                     args.lr = args.lr
-        #                 elif iter <= 80:
-        #                     args.lr = args.lr * 0.995
-        #                 else:
-        #                     args.lr = args.lr * 0.99
-        #         w_local, loss, indd = local.train(net=net_local.to(args.device), teacher_net=teacher_net,
-        #                                           w_glob_keys=w_glob_keys, lr=args.lr, last=last, param_weight=param_weight)
-        #     else:
-        #         w_local, loss, indd = local.train(net=net_local.to(args.device), teacher_net=teacher_net,
-        #                                           w_glob_keys=w_glob_keys,
-        #                                           lr=args.lr, last=last, param_weight=param_weight)
-
-        # else:
         w_local = net_local.state_dict()
         for k in w_locals[idx].keys():
             w_local[k] = w_locals[idx][k]
 
         net_local.load_state_dict(w_local)
         net_local.eval()
-        if 'femnist' in args.dataset or 'sent140' in args.dataset:
-            # print("---------user----------")
-            # print(dict_users_test[idx])
+        if 'femnist' in args.dataset:
             a, b, confusion_martix =  test_img_local(net_local, dataset_test, args,idx=dict_users_test[idx],indd=indd, user_idx=idx)
             tot += len(dataset_test[dict_users_test[idx]]['x'])
-            # print(len(dataset_test[dict_users_test[idx]]['x']))
         else:
             a, b, confusion_martix = test_img_local(net_local, dataset_test, args, user_idx=idx, idxs=dict_users_test[idx], iter=iter)
             tot += len(dict_users_test[idx])
-        if 'femnist' in args.dataset or 'sent140' in args.dataset:
-            acc_test_local[idx] = a*len(dataset_test[dict_users_test[idx]]['x'])
-            loss_test_local[idx] = b*len(dataset_test[dict_users_test[idx]]['x'])
-        else:
-            acc_test_local_record[idx] = a
-            loss_test_local_record[idx] = b
-            confusion_martix_record[idx] = confusion_martix.tolist()
-            acc_test_local[idx] = a*len(dict_users_test[idx])
-            loss_test_local[idx] = b*len(dict_users_test[idx])
-        del net_local
-
-    if iter is not None:
-        loss_logger.info("local acc of round {}: \n{}".format(iter,
-                                                              {ii : acc for ii, acc in enumerate(acc_test_local_record.tolist())}
-                                                              ))
-        loss_logger.info("local acc of round {}: \n{}".format(iter, json.dumps(acc_test_local_record.tolist())))
-        loss_logger.info("local loss of round {}: \n{}".format(iter, json.dumps(loss_test_local_record.tolist())))
-        cfs_mtrx_logger.info("local confusion martix of round {}: \n{}".format(iter, json.dumps(confusion_martix_record)))
-
-    if return_all:
-        return acc_test_local, loss_test_local
-    return sum(acc_test_local)/tot, sum(loss_test_local)/tot
-
-def test_img_avg_all(net, args, dataset_test, dict_users_test,w_locals=None,w_glob_keys=None, indd=None,dataset_train=None,dict_users_train=None, return_all=False, iter=None):
-    tot = 0
-    num_idxxs = args.num_users
-    acc_test_local = np.zeros(num_idxxs)
-    loss_test_local = np.zeros(num_idxxs)
-    acc_test_local_record = np.zeros(num_idxxs)
-    loss_test_local_record = np.zeros(num_idxxs)
-    confusion_martix_record = {i: None for i in range(num_idxxs)}
-    for idx in range(num_idxxs):
-        net_local = copy.deepcopy(net)
-        net_local.eval()
-        if 'femnist' in args.dataset or 'sent140' in args.dataset:
-            # print("---------user----------")
-            # print(dict_users_test[idx])
-            a, b, confusion_martix =  test_img_local(net_local, dataset_test, args,idx=dict_users_test[idx],indd=indd, user_idx=idx)
-            tot += len(dataset_test[dict_users_test[idx]]['x'])
-            # print(len(dataset_test[dict_users_test[idx]]['x']))
-        else:
-            a, b, confusion_martix = test_img_local(net_local, dataset_test, args, user_idx=idx, idxs=dict_users_test[idx], iter=iter)
-            tot += len(dict_users_test[idx])
-        if 'femnist' in args.dataset or 'sent140' in args.dataset:
-            acc_test_local[idx] = a*len(dataset_test[dict_users_test[idx]]['x'])
-            loss_test_local[idx] = b*len(dataset_test[dict_users_test[idx]]['x'])
-        else:
-            acc_test_local_record[idx] = a
-            loss_test_local_record[idx] = b
-            confusion_martix_record[idx] = confusion_martix.tolist()
-            acc_test_local[idx] = a*len(dict_users_test[idx])
-            loss_test_local[idx] = b*len(dict_users_test[idx])
-        del net_local
-
-    if iter is not None:
-        loss_logger.info("local acc of round {}: \n{}".format(iter,
-                                                              {ii : acc for ii, acc in enumerate(acc_test_local_record.tolist())}
-                                                              ))
-        loss_logger.info("local acc of round {}: \n{}".format(iter, json.dumps(acc_test_local_record.tolist())))
-        loss_logger.info("local loss of round {}: \n{}".format(iter, json.dumps(loss_test_local_record.tolist())))
-        cfs_mtrx_logger.info("local confusion martix of round {}: \n{}".format(iter, json.dumps(confusion_martix_record)))
-
-    if return_all:
-        return acc_test_local, loss_test_local
-    return sum(acc_test_local)/tot, sum(loss_test_local)/tot
-
-
-def test_img_local_all_avg(net, args, dataset_test, dict_users_test,w_locals=None,w_glob_keys=None, indd=None,dataset_train=None,dict_users_train=None, return_all=False, iter=None):
-    tot = 0
-    num_idxxs = args.num_users
-    acc_test_local = np.zeros(num_idxxs)
-    loss_test_local = np.zeros(num_idxxs)
-    acc_test_local_record = np.zeros(num_idxxs)
-    loss_test_local_record = np.zeros(num_idxxs)
-    confusion_martix_record = {i: None for i in range(num_idxxs)}
-    for idx in range(num_idxxs):
-        net_local = copy.deepcopy(net)
-        if w_locals is not None:
-            w_local = net_local.state_dict()
-            net_local.load_state_dict(w_local)
-        net_local.eval()
-        if 'femnist' in args.dataset or 'sent140' in args.dataset:
-            # print("---------user----------")
-            # print(dict_users_test[idx])
-            a, b, confusion_martix =  test_img_local(net_local, dataset_test, args,idx=dict_users_test[idx],indd=indd, user_idx=idx)
-            tot += len(dataset_test[dict_users_test[idx]]['x'])
-            # print(len(dataset_test[dict_users_test[idx]]['x']))
-        else:
-            a, b, confusion_martix = test_img_local(net_local, dataset_test, args, user_idx=idx, idxs=dict_users_test[idx], iter=iter)
-            tot += len(dict_users_test[idx])
-        if 'femnist' in args.dataset or 'sent140' in args.dataset:
-            acc_test_local[idx] = a*len(dataset_test[dict_users_test[idx]]['x'])
-            loss_test_local[idx] = b*len(dataset_test[dict_users_test[idx]]['x'])
-        else:
-            acc_test_local_record[idx] = a
-            loss_test_local_record[idx] = b
-            confusion_martix_record[idx] = confusion_martix.tolist()
-            acc_test_local[idx] = a*len(dict_users_test[idx])
-            loss_test_local[idx] = b*len(dict_users_test[idx])
-        del net_local
-
-    if iter is not None:
-        loss_logger.info("local acc of round {}: \n{}".format(iter,
-                                                              {ii : acc for ii, acc in enumerate(acc_test_local_record.tolist())}
-                                                              ))
-        loss_logger.info("local acc of round {}: \n{}".format(iter, json.dumps(acc_test_local_record.tolist())))
-        loss_logger.info("local loss of round {}: \n{}".format(iter, json.dumps(loss_test_local_record.tolist())))
-        cfs_mtrx_logger.info("local confusion martix of round {}: \n{}".format(iter, json.dumps(confusion_martix_record)))
-
-    if return_all:
-        return acc_test_local, loss_test_local
-    return sum(acc_test_local)/tot, sum(loss_test_local)/tot
-
-
-def test_img_local_all_headavg(net, args, dataset_test, dict_users_test,w_locals=None,w_glob_keys=None, indd=None,dataset_train=None,dict_users_train=None, return_all=False, iter=None):
-    tot = 0
-    num_idxxs = args.num_users
-    acc_test_local = np.zeros(num_idxxs)
-    loss_test_local = np.zeros(num_idxxs)
-    acc_test_local_record = np.zeros(num_idxxs)
-    loss_test_local_record = np.zeros(num_idxxs)
-    confusion_martix_record = {i: None for i in range(num_idxxs)}
-    for idx in range(num_idxxs):
-        net_local = copy.deepcopy(net)
-        if w_locals is not None:
-            w_local = net_local.state_dict()
-            for k in w_locals[idx].keys():
-                if k not in w_glob_keys:
-                    w_local[k] = w_locals[idx][k]
-            net_local.load_state_dict(w_local)
-        net_local.eval()
-        if 'femnist' in args.dataset or 'sent140' in args.dataset:
-            # print("---------user----------")
-            # print(dict_users_test[idx])
-            a, b, confusion_martix =  test_img_local(net_local, dataset_test, args,idx=dict_users_test[idx],indd=indd, user_idx=idx)
-            tot += len(dataset_test[dict_users_test[idx]]['x'])
-            # print(len(dataset_test[dict_users_test[idx]]['x']))
-        else:
-            a, b, confusion_martix = test_img_local(net_local, dataset_test, args, user_idx=idx, idxs=dict_users_test[idx], iter=iter)
-            tot += len(dict_users_test[idx])
-        if 'femnist' in args.dataset or 'sent140' in args.dataset:
+        if 'femnist' in args.dataset:
             acc_test_local[idx] = a*len(dataset_test[dict_users_test[idx]]['x'])
             loss_test_local[idx] = b*len(dataset_test[dict_users_test[idx]]['x'])
         else:

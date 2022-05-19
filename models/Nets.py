@@ -7,11 +7,6 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torchvision import models
-import json
-import numpy as np
-from models.language_utils import get_word_emb_arr
-import copy
 
 if torch.cuda.is_available():
     torch.cuda.manual_seed(20)
