@@ -61,7 +61,7 @@ if __name__ == '__main__':
     net_glob.train()
 
     # specify the representation parameters (in w_glob_keys) and head parameters (all others)
-    if args.alg == 'fedbkd' or args.alg == 'fedrep' or args.alg == 'fedper':
+    if args.alg == 'fedec' or args.alg == 'fedrep' or args.alg == 'fedper':
         if 'cifar' in args.dataset:
             w_glob_keys = [net_glob.weight_keys[i] for i in [0, 1]]
         elif 'mnist' in args.dataset:
